@@ -1,0 +1,11 @@
+{
+  "folders": [
+    {
+      "name": "SuperMarkdown Smoke Test",
+      "path": ".",
+    },
+  ],
+  "settings": {
+    "supermarkdown.takeOverKeybindings": true,
+  },
+}

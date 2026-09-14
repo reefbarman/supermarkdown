@@ -1,0 +1,183 @@
+{
+  "name": "supermarkdown",
+  "displayName": "SuperMarkdown",
+  "description": "A GitHub-compatible, interactive Markdown preview for VS Code.",
+  "version": "0.1.6",
+  "publisher": "reefbarman",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:markdown",
+    "onWebviewPanel:supermarkdown.preview"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Local Markdown rendering remains available; remote resources and future custom styling are disabled."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "supermarkdown.openPreview",
+        "title": "SuperMarkdown: Open Preview",
+        "icon": {
+          "light": "media/supermarkdown-light.svg",
+          "dark": "media/supermarkdown-dark.svg"
+        }
+      },
+      {
+        "command": "supermarkdown.openPreviewToSide",
+        "title": "SuperMarkdown: Open Preview to the Side",
+        "icon": {
+          "light": "media/supermarkdown-light.svg",
+          "dark": "media/supermarkdown-dark.svg"
+        }
+      },
+      {
+        "command": "supermarkdown.refreshPreview",
+        "title": "SuperMarkdown: Refresh Preview"
+      },
+      {
+        "command": "supermarkdown.togglePreviewLock",
+        "title": "SuperMarkdown: Toggle Preview Lock"
+      },
+      {
+        "command": "supermarkdown.openCommentsSidecar",
+        "title": "SuperMarkdown: Open Comments Sidecar"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "supermarkdown.openPreview",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
+        "when": "config.supermarkdown.takeOverKeybindings && editorLangId == markdown && editorTextFocus"
+      },
+      {
+        "command": "supermarkdown.openPreviewToSide",
+        "key": "ctrl+k v",
+        "mac": "cmd+k v",
+        "when": "config.supermarkdown.takeOverKeybindings && editorLangId == markdown && editorTextFocus"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "supermarkdown.openPreviewToSide",
+          "when": "resourceLangId == markdown",
+          "group": "navigation@10"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "supermarkdown.openPreview",
+          "when": "editorLangId == markdown",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "supermarkdown.openPreviewToSide",
+          "when": "resourceExtname == .md",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SuperMarkdown",
+      "properties": {
+        "supermarkdown.takeOverKeybindings": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prefer SuperMarkdown for the standard Markdown preview keybindings. User keybindings still take precedence."
+        },
+        "supermarkdown.liveUpdateDelay": {
+          "type": "number",
+          "default": 250,
+          "minimum": 50,
+          "maximum": 2000,
+          "description": "Delay in milliseconds before refreshing a preview after an edit."
+        },
+        "supermarkdown.scrollPreviewWithEditor": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scroll the preview when the source editor scrolls."
+        },
+        "supermarkdown.scrollEditorWithPreview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scroll the source editor when the preview scrolls."
+        },
+        "supermarkdown.preserveScrollOnUpdate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Preserve the nearest source position during live preview updates."
+        },
+        "supermarkdown.openMarkdownLinks": {
+          "type": "string",
+          "enum": [
+            "preview",
+            "editor"
+          ],
+          "enumDescriptions": [
+            "Open linked Markdown files in the current SuperMarkdown preview.",
+            "Open linked Markdown files in a text editor."
+          ],
+          "default": "preview",
+          "description": "Controls how relative links to Markdown files open."
+        },
+        "supermarkdown.allowRemoteImages": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow HTTPS images in trusted workspaces. Remote images are always blocked in untrusted workspaces."
+        },
+        "supermarkdown.commentAuthor": {
+          "type": "string",
+          "default": "Tristan",
+          "description": "Author name stored in new SuperMarkdown comments."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepackage": "node -e \"require('node:fs').mkdirSync('releases', { recursive: true })\"",
+    "package": "npm run build && vsce package --allow-missing-repository --no-dependencies --out",
+    "release": "bash scripts/release.sh"
+  },
+  "dependencies": {
+    "dompurify": "3.4.14",
+    "github-slugger": "2.0.0",
+    "highlight.js": "11.12.0",
+    "katex": "0.18.4",
+    "markdown-it": "14.1.0",
+    "markdown-it-emoji": "3.1.0",
+    "markdown-it-footnote": "4.0.0",
+    "mermaid": "11.17.2",
+    "morphdom": "2.7.8",
+    "sanitize-html": "2.13.1"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "14.1.2",
+    "@types/morphdom": "2.3.0",
+    "@types/node": "22.10.2",
+    "@types/sanitize-html": "2.13.0",
+    "@types/vscode": "1.96.0",
+    "@vscode/vsce": "3.2.1",
+    "esbuild": "0.24.2",
+    "github-markdown-css": "5.8.1",
+    "typescript": "5.7.2",
+    "vitest": "2.1.8"
+  }
+}

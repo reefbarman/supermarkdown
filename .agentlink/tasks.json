@@ -1,0 +1,20 @@
+{
+  "tasks": [
+    {
+      "label": "Release patch and install",
+      "command": "npm run release -- --install"
+    },
+    {
+      "label": "Release minor and install",
+      "command": "npm run release -- --minor --install"
+    },
+    {
+      "label": "Validate release",
+      "command": "npm run release -- --dry-run"
+    },
+    {
+      "label": "Run tests",
+      "command": "npm test"
+    }
+  ]
+}

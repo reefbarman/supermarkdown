@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "source": {
+    "file": "smoke.md",
+    "contentHash": "sha256:152e9b7e21fcc97a5461ea2e6fda6ef6d619280a809e8294a602d913e514bbe2"
+  },
+  "updatedAt": "2026-08-26T09:39:18.162Z",
+  "comments": [
+    {
+      "id": "c-298e6fa8-7659-41d2-b3d9-3b4f9df4f94f",
+      "author": "Tristan",
+      "createdAt": "2026-08-26T09:06:15.717Z",
+      "updatedAt": "2026-08-26T09:39:18.162Z",
+      "resolution": "resolved",
+      "anchor": {
+        "health": "attached",
+        "start": 818,
+        "end": 827,
+        "lineHint": 55,
+        "blockHash": "sha256:dda5c944e36a873046058f960a26234ddfca610bc9cf7394c26d356edf4d8788",
+        "quote": {
+          "exact": "paragraph",
+          "prefix": "This standalone ",
+          "suffix": " can be edited from the preview."
+        }
+      },
+      "body": "hi"
+    }
+  ]
+}

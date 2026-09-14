@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run SuperMarkdown Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "${workspaceFolder}/test/fixtures/manual/supermarkdown-smoke.code-workspace"
+      ],
+      "outFiles": ["${workspaceFolder}/dist/**/*.js"],
+      "preLaunchTask": "Build SuperMarkdown",
+      "sourceMaps": true
+    }
+  ]
+}

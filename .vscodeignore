@@ -1,0 +1,13 @@
+**/.agentlink/**
+**/.vscode/**
+.markdownlintignore
+**/test/**
+**/*.test.ts
+**/*.map
+plans/**
+src/**
+webview/**
+esbuild.mjs
+tsconfig.json
+releases/**
+node_modules/**
