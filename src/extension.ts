@@ -47,9 +47,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("supermarkdown.refreshPreview", () =>
       previews.refresh(),
     ),
-    vscode.commands.registerCommand("supermarkdown.togglePreviewLock", () =>
-      previews.toggleLock(),
-    ),
+
     vscode.commands.registerCommand(
       "supermarkdown.openCommentsSidecar",
       async (uri?: vscode.Uri) => {

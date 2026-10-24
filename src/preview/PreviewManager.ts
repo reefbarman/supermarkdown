@@ -9,6 +9,7 @@ import { createComment, type CommentSidecar } from "../comments/model";
 import {
   mapRenderedQuoteToSource,
   renderedQuoteOccurrenceForSource,
+  renderedSegmentForSource,
 } from "../comments/sourceMapping";
 import { EditService, type GuardedEditResult } from "../edits/EditService";
 import { renderMarkdown, type RenderResult } from "../engine/renderer";
@@ -19,7 +20,10 @@ import {
 } from "./links";
 import {
   parseWebviewMessage,
+  rejectedRequest,
+  type AddCommentMessage,
   type CommentPayload,
+  type CommentSegmentPayload,
   type CommentsMessage,
   type ExtensionToWebviewMessage,
   type PreviewErrorMessage,
@@ -36,103 +40,72 @@ interface PreviewState {
   pendingRender?: RenderMessage;
   pendingComments?: CommentsMessage;
   pendingError?: PreviewErrorMessage;
+  pendingAnchor?: string;
   updateTimer?: NodeJS.Timeout;
   webviewReady: boolean;
-  locked: boolean;
   suppressEditorScrollUntil: number;
   imageWatchers: vscode.Disposable[];
 }
 
 interface SerializedPreviewState {
   uri?: string;
-  locked?: boolean;
+}
+
+/** Services shared by every preview panel. */
+interface PreviewServices {
+  extensionUri: vscode.Uri;
+  comments: CommentStore;
+  edits: EditService;
+  output: vscode.LogOutputChannel;
+  openPreview(
+    document: vscode.TextDocument,
+    viewColumn: vscode.ViewColumn,
+    fragment?: string,
+  ): Promise<void>;
 }
 
 function isMarkdown(document: vscode.TextDocument): boolean {
   return document.languageId === "markdown";
 }
 
-export class PreviewManager implements vscode.Disposable {
-  private panel: vscode.WebviewPanel | undefined;
-  private state: PreviewState | undefined;
-  private readonly disposables: vscode.Disposable[] = [];
-  private readonly edits = new EditService();
-  private readonly comments = new CommentStore();
-  private readonly output = vscode.window.createOutputChannel("SuperMarkdown", {
-    log: true,
-  });
+function previewKey(uri: vscode.Uri): string {
+  return uri.toString();
+}
 
-  constructor(private readonly extensionUri: vscode.Uri) {
+/**
+ * Owns one preview panel per Markdown file. Each panel stays bound to the file
+ * it was opened for; switching editors never changes what a panel renders.
+ */
+export class PreviewManager implements vscode.Disposable {
+  private readonly previews = new Map<string, MarkdownPreview>();
+  private readonly disposables: vscode.Disposable[] = [];
+  private readonly services: PreviewServices;
+
+  constructor(extensionUri: vscode.Uri) {
+    const output = vscode.window.createOutputChannel("SuperMarkdown", {
+      log: true,
+    });
+    this.services = {
+      extensionUri,
+      comments: new CommentStore(),
+      edits: new EditService(),
+      output,
+      openPreview: (document, viewColumn, fragment) =>
+        this.open(document, viewColumn, fragment),
+    };
+    const sidecarWatcher = vscode.workspace.createFileSystemWatcher(
+      "**/*.md.comments.json",
+    );
     this.disposables.push(
-      vscode.workspace.onDidChangeTextDocument((event) => {
-        if (this.isActiveDocument(event.document)) {
-          this.scheduleRender();
-        }
-      }),
+      output,
       vscode.workspace.onDidSaveTextDocument((document) => {
         if (isMarkdown(document) && document.uri.scheme !== "untitled") {
           void this.reanchorSavedComments(document);
         }
       }),
-      vscode.window.onDidChangeActiveTextEditor((editor) => {
-        if (
-          editor &&
-          isMarkdown(editor.document) &&
-          this.state &&
-          !this.state.locked
-        ) {
-          this.state.document = editor.document;
-          this.updateLocalResourceRoots(editor.document);
-          this.scheduleRender(0);
-        }
-      }),
-      vscode.window.onDidChangeTextEditorVisibleRanges((event) => {
-        if (
-          !this.isActiveDocument(event.textEditor.document) ||
-          !this.settings().scrollPreviewWithEditor
-        ) {
-          return;
-        }
-        if (Date.now() < (this.state?.suppressEditorScrollUntil ?? 0)) {
-          return;
-        }
-        const line = event.visibleRanges[0]?.start.line;
-        if (line !== undefined) {
-          void this.panel?.webview.postMessage({
-            type: "scrollToLine",
-            generation: this.state?.generation ?? 0,
-            line,
-            source: "editor",
-          });
-        }
-      }),
-
-      vscode.workspace.onDidChangeConfiguration((event) => {
-        if (
-          event.affectsConfiguration("supermarkdown") ||
-          event.affectsConfiguration("markdown.preview") ||
-          event.affectsConfiguration("editor.wordWrap") ||
-          event.affectsConfiguration("editor.scrollBeyondLastLine")
-        ) {
-          if (event.affectsConfiguration("supermarkdown.allowRemoteImages")) {
-            this.rebuildWebviewShell();
-          } else {
-            this.scheduleRender(0);
-          }
-        }
-      }),
-      vscode.workspace.onDidGrantWorkspaceTrust(() =>
-        this.rebuildWebviewShell(),
-      ),
       vscode.workspace.onDidRenameFiles(
         (event) => void this.handleSourceRenames(event.files),
       ),
-    );
-    const sidecarWatcher = vscode.workspace.createFileSystemWatcher(
-      "**/*.md.comments.json",
-    );
-    this.disposables.push(
-      this.output,
       sidecarWatcher,
       sidecarWatcher.onDidCreate((uri) => this.sidecarChanged(uri)),
       sidecarWatcher.onDidChange((uri) => this.sidecarChanged(uri)),
@@ -160,12 +133,14 @@ export class PreviewManager implements vscode.Disposable {
             panel.dispose();
             return;
           }
-          if (!isMarkdown(document)) {
+          if (
+            !isMarkdown(document) ||
+            this.previews.has(previewKey(document.uri))
+          ) {
             panel.dispose();
             return;
           }
-          this.attachPanel(panel, document, Boolean(restored.locked));
-          void this.render();
+          this.adopt(panel, document);
         },
       }),
     );
@@ -174,41 +149,38 @@ export class PreviewManager implements vscode.Disposable {
   async open(
     document: vscode.TextDocument,
     viewColumn: vscode.ViewColumn,
+    fragment?: string,
   ): Promise<void> {
-    this.output.info(
+    this.services.output.info(
       `Open requested for ${document.uri.toString()} in column ${viewColumn}.`,
     );
-    if (!this.panel) {
+    let preview = this.previews.get(previewKey(document.uri));
+    if (preview) {
+      preview.reveal(viewColumn);
+    } else {
       const panel = vscode.window.createWebviewPanel(
         "supermarkdown.preview",
-        `Preview ${this.titleFor(document)}`,
+        previewTitle(document),
         viewColumn,
-        this.webviewOptions(document),
+        webviewOptions(this.services.extensionUri, document),
       );
-      this.output.info("Webview panel created.");
-      this.attachPanel(panel, document, false);
-    } else {
-      this.panel.reveal(viewColumn);
-      this.clearImageWatchers();
-      this.state = {
-        document,
-        generation: this.state?.generation ?? 0,
-        locked: this.state?.locked ?? false,
-        webviewReady: this.state?.webviewReady ?? false,
-        suppressEditorScrollUntil: 0,
-        imageWatchers: [],
-      };
-      this.updateLocalResourceRoots(document);
+      this.services.output.info("Webview panel created.");
+      preview = this.adopt(panel, document);
     }
-    void this.render();
+    if (fragment) {
+      preview.navigateToFragment(fragment);
+    }
   }
 
   async refresh(): Promise<void> {
-    void this.render();
+    const active = this.activePreview();
+    for (const preview of active ? [active] : this.previews.values()) {
+      preview.refresh();
+    }
   }
 
   async openCommentsSidecar(document?: vscode.TextDocument): Promise<void> {
-    const target = document ?? this.state?.document;
+    const target = document ?? this.activePreview()?.document;
     if (!target || !isMarkdown(target) || target.uri.scheme === "untitled") {
       void vscode.window.showWarningMessage(
         "Open a saved Markdown file to view its SuperMarkdown comments.",
@@ -216,7 +188,7 @@ export class PreviewManager implements vscode.Disposable {
       return;
     }
     try {
-      const sidecar = await this.comments.openSidecar(target);
+      const sidecar = await this.services.comments.openSidecar(target);
       await vscode.window.showTextDocument(sidecar, { preview: false });
     } catch {
       void vscode.window.showErrorMessage(
@@ -225,95 +197,267 @@ export class PreviewManager implements vscode.Disposable {
     }
   }
 
-  toggleLock(): void {
-    if (!this.state) {
-      return;
-    }
-    this.state.locked = !this.state.locked;
-    this.updatePanelTitle();
-    void this.render();
-    void vscode.window.showInformationMessage(
-      `SuperMarkdown preview ${this.state.locked ? "locked" : "unlocked"}.`,
-    );
-  }
-
   dispose(): void {
-    this.clearTimer();
-    this.clearImageWatchers();
-    this.panel?.dispose();
+    for (const preview of Array.from(this.previews.values())) {
+      preview.dispose();
+    }
+    this.previews.clear();
     for (const disposable of this.disposables) {
       disposable.dispose();
     }
   }
 
-  private attachPanel(
+  private adopt(
     panel: vscode.WebviewPanel,
     document: vscode.TextDocument,
-    locked: boolean,
-  ): void {
-    this.panel?.dispose();
+  ): MarkdownPreview {
+    const key = previewKey(document.uri);
+    const preview = new MarkdownPreview(
+      this.services,
+      panel,
+      document,
+      (disposed) => {
+        if (this.previews.get(key) === disposed) {
+          this.previews.delete(key);
+        }
+      },
+    );
+    this.previews.set(key, preview);
+    preview.refresh();
+    return preview;
+  }
+
+  private activePreview(): MarkdownPreview | undefined {
+    for (const preview of this.previews.values()) {
+      if (preview.active) {
+        return preview;
+      }
+    }
+    return undefined;
+  }
+
+  private async reanchorSavedComments(
+    document: vscode.TextDocument,
+  ): Promise<void> {
+    const result = await this.services.comments.reanchorExisting(document);
+    if (result && !result.ok) {
+      void vscode.window.showWarningMessage(commentStoreMessage(result.error));
+    }
+  }
+
+  private async handleSourceRenames(
+    files: readonly { oldUri: vscode.Uri; newUri: vscode.Uri }[],
+  ): Promise<void> {
+    for (const file of files) {
+      if (!/\.(?:md|mdown|markdown)$/iu.test(file.oldUri.path)) {
+        continue;
+      }
+      const oldSidecar = this.services.comments.sidecarUri(file.oldUri);
+      const newSidecar = this.services.comments.sidecarUri(file.newUri);
+      try {
+        await vscode.workspace.fs.stat(oldSidecar);
+      } catch {
+        continue;
+      }
+      try {
+        await vscode.workspace.fs.rename(oldSidecar, newSidecar, {
+          overwrite: false,
+        });
+      } catch {
+        void vscode.window.showWarningMessage(
+          "SuperMarkdown could not move the comments sidecar with the renamed Markdown file.",
+        );
+      }
+    }
+  }
+
+  private sidecarChanged(uri: vscode.Uri): void {
+    for (const preview of this.previews.values()) {
+      preview.sidecarChanged(uri);
+    }
+  }
+}
+
+function previewTitle(document: vscode.TextDocument): string {
+  return `Preview ${document.uri.path.split("/").pop() ?? "Markdown"}`;
+}
+
+function webviewOptions(
+  extensionUri: vscode.Uri,
+  document: vscode.TextDocument,
+): vscode.WebviewOptions & vscode.WebviewPanelOptions {
+  return {
+    enableFindWidget: true,
+    enableScripts: true,
+    retainContextWhenHidden: true,
+    localResourceRoots: [
+      vscode.Uri.joinPath(extensionUri, "dist"),
+      vscode.workspace.getWorkspaceFolder(document.uri)?.uri ??
+        vscode.Uri.joinPath(document.uri, ".."),
+    ],
+  };
+}
+
+function commentStoreMessage(error: CommentStoreError): string {
+  if (error === "dirty-sidecar") {
+    return "Save the open comments sidecar before changing comments in the preview.";
+  }
+  if (error === "malformed-sidecar") {
+    return "The comments sidecar is invalid or uses a newer schema. It was not overwritten.";
+  }
+  if (error === "sidecar-conflict") {
+    return "The comments sidecar changed externally. Review those changes and try again.";
+  }
+  return "SuperMarkdown could not read or write the comments sidecar.";
+}
+
+/** A single preview panel bound to one Markdown document for its lifetime. */
+class MarkdownPreview implements vscode.Disposable {
+  private panel: vscode.WebviewPanel | undefined;
+  private state: PreviewState | undefined;
+  private readonly disposables: vscode.Disposable[] = [];
+  readonly document: vscode.TextDocument;
+
+  constructor(
+    private readonly services: PreviewServices,
+    panel: vscode.WebviewPanel,
+    document: vscode.TextDocument,
+    private readonly onDisposed: (preview: MarkdownPreview) => void,
+  ) {
+    this.document = document;
     this.panel = panel;
-    panel.iconPath = {
-      light: vscode.Uri.joinPath(
-        this.extensionUri,
-        "media",
-        "supermarkdown-light.svg",
-      ),
-      dark: vscode.Uri.joinPath(
-        this.extensionUri,
-        "media",
-        "supermarkdown-dark.svg",
-      ),
-    };
     this.state = {
       document,
       generation: 0,
-      locked,
       webviewReady: false,
       suppressEditorScrollUntil: 0,
       imageWatchers: [],
     };
-    panel.webview.options = this.webviewOptions(document);
+    panel.iconPath = {
+      light: vscode.Uri.joinPath(
+        services.extensionUri,
+        "media",
+        "supermarkdown-light.svg",
+      ),
+      dark: vscode.Uri.joinPath(
+        services.extensionUri,
+        "media",
+        "supermarkdown-dark.svg",
+      ),
+    };
+    panel.webview.options = webviewOptions(services.extensionUri, document);
     const shell = webviewShell(
       panel.webview,
-      this.extensionUri,
+      services.extensionUri,
       this.remoteImagesAllowed(),
     );
     panel.webview.html = shell;
     this.output.info(`Webview shell assigned (${shell.length} characters).`);
-    panel.onDidDispose(() => {
-      if (this.panel === panel) {
-        this.panel = undefined;
-        this.clearTimer();
-        this.clearImageWatchers();
-        this.state = undefined;
-      }
-    });
-    panel.webview.onDidReceiveMessage(
-      (value) => void this.handleMessage(value),
-    );
     this.updatePanelTitle();
+
+    this.disposables.push(
+      panel.onDidDispose(() => this.dispose()),
+      panel.webview.onDidReceiveMessage(
+        (value) => void this.handleMessage(value),
+      ),
+      vscode.workspace.onDidChangeTextDocument((event) => {
+        if (this.isActiveDocument(event.document)) {
+          this.scheduleRender();
+        }
+      }),
+      vscode.window.onDidChangeTextEditorVisibleRanges((event) => {
+        if (
+          !this.isActiveDocument(event.textEditor.document) ||
+          !this.settings().scrollPreviewWithEditor
+        ) {
+          return;
+        }
+        if (Date.now() < (this.state?.suppressEditorScrollUntil ?? 0)) {
+          return;
+        }
+        const line = event.visibleRanges[0]?.start.line;
+        if (line !== undefined) {
+          void this.panel?.webview.postMessage({
+            type: "scrollToLine",
+            generation: this.state?.generation ?? 0,
+            line,
+            source: "editor",
+          });
+        }
+      }),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (
+          event.affectsConfiguration("supermarkdown") ||
+          event.affectsConfiguration("markdown.preview") ||
+          event.affectsConfiguration("editor.wordWrap") ||
+          event.affectsConfiguration("editor.scrollBeyondLastLine")
+        ) {
+          if (event.affectsConfiguration("supermarkdown.allowRemoteImages")) {
+            this.rebuildWebviewShell();
+          } else {
+            this.scheduleRender(0);
+          }
+        }
+      }),
+      vscode.workspace.onDidGrantWorkspaceTrust(() =>
+        this.rebuildWebviewShell(),
+      ),
+    );
   }
 
-  private webviewOptions(
-    document: vscode.TextDocument,
-  ): vscode.WebviewOptions & vscode.WebviewPanelOptions {
-    return {
-      enableFindWidget: true,
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this.extensionUri, "dist"),
-        vscode.workspace.getWorkspaceFolder(document.uri)?.uri ??
-          vscode.Uri.joinPath(document.uri, ".."),
-      ],
-    };
+  get active(): boolean {
+    return Boolean(this.panel?.active);
   }
 
-  private updateLocalResourceRoots(document: vscode.TextDocument): void {
-    if (this.panel) {
-      this.panel.webview.options = this.webviewOptions(document);
+  private get output(): vscode.LogOutputChannel {
+    return this.services.output;
+  }
+
+  private get comments(): CommentStore {
+    return this.services.comments;
+  }
+
+  reveal(viewColumn: vscode.ViewColumn): void {
+    this.panel?.reveal(viewColumn);
+  }
+
+  refresh(): void {
+    void this.render();
+  }
+
+  navigateToFragment(fragment: string): void {
+    if (!this.panel || !this.state) {
+      return;
     }
+    this.state.pendingAnchor = fragment;
+    this.flushPending(this.panel, this.state);
+  }
+
+  sidecarChanged(uri: vscode.Uri): void {
+    if (
+      this.state &&
+      uri.toString() ===
+        this.comments.sidecarUri(this.state.document.uri).toString()
+    ) {
+      this.scheduleRender(50);
+    }
+  }
+
+  dispose(): void {
+    if (!this.panel && !this.state) {
+      return;
+    }
+    const panel = this.panel;
+    this.clearTimer();
+    this.clearImageWatchers();
+    this.panel = undefined;
+    this.state = undefined;
+    for (const disposable of this.disposables) {
+      disposable.dispose();
+    }
+    this.disposables.length = 0;
+    panel?.dispose();
+    this.onDisposed(this);
   }
 
   private remoteImagesAllowed(): boolean {
@@ -334,7 +478,7 @@ export class PreviewManager implements vscode.Disposable {
     this.state.pendingError = undefined;
     this.panel.webview.html = webviewShell(
       this.panel.webview,
-      this.extensionUri,
+      this.services.extensionUri,
       this.remoteImagesAllowed(),
     );
     void this.render();
@@ -379,6 +523,15 @@ export class PreviewManager implements vscode.Disposable {
     }
     if (error) {
       this.sendToWebview(panel, error);
+    }
+    if (state.pendingAnchor && state.render) {
+      const fragment = state.pendingAnchor;
+      state.pendingAnchor = undefined;
+      this.sendToWebview(panel, {
+        type: "navigateAnchor",
+        generation: state.generation,
+        fragment,
+      });
     }
   }
 
@@ -564,7 +717,6 @@ export class PreviewManager implements vscode.Disposable {
       if (
         this.panel === panel &&
         this.state === state &&
-        state.document.uri.toString() === document.uri.toString() &&
         document.version === documentVersion &&
         generation === state.generation
       ) {
@@ -583,7 +735,6 @@ export class PreviewManager implements vscode.Disposable {
     if (
       this.panel !== panel ||
       this.state !== state ||
-      state.document.uri.toString() !== document.uri.toString() ||
       document.version !== documentVersion ||
       generation !== state.generation
     ) {
@@ -623,7 +774,7 @@ export class PreviewManager implements vscode.Disposable {
       })),
       comments: [],
       notices: [],
-      locked: state.locked,
+      locked: true,
       settings,
     };
     state.pendingRender = payload;
@@ -654,7 +805,6 @@ export class PreviewManager implements vscode.Disposable {
     if (
       this.panel !== panel ||
       this.state !== state ||
-      state.document.uri.toString() !== document.uri.toString() ||
       document.version !== documentVersion ||
       generation !== state.generation
     ) {
@@ -668,7 +818,7 @@ export class PreviewManager implements vscode.Disposable {
       : [
           {
             level: "warning" as const,
-            message: this.commentStoreMessage(loadedComments.error),
+            message: commentStoreMessage(loadedComments.error),
           },
         ];
     state.pendingComments = {
@@ -681,8 +831,42 @@ export class PreviewManager implements vscode.Disposable {
   }
 
   private async handleMessage(value: unknown): Promise<void> {
+    try {
+      await this.handleMessageNow(value);
+    } catch (error) {
+      this.output.error(
+        `Failed to handle webview message: ${
+          error instanceof Error
+            ? (error.stack ?? error.message)
+            : String(error)
+        }`,
+      );
+      const rejected = rejectedRequest(value);
+      if (rejected) {
+        await this.postCommentResult(
+          rejected.requestId,
+          false,
+          "SuperMarkdown could not save this comment. See the SuperMarkdown output for details.",
+        );
+      }
+    }
+  }
+
+  private async handleMessageNow(value: unknown): Promise<void> {
     const message = parseWebviewMessage(value);
-    if (!message || !this.state) {
+    if (!this.state) {
+      return;
+    }
+    if (!message) {
+      const rejected = rejectedRequest(value);
+      if (rejected) {
+        this.output.warn(`Rejected malformed ${rejected.type} request.`);
+        await this.postCommentResult(
+          rejected.requestId,
+          false,
+          "SuperMarkdown could not read this comment request. Select the text again.",
+        );
+      }
       return;
     }
     if (message.type === "ready") {
@@ -728,14 +912,11 @@ export class PreviewManager implements vscode.Disposable {
         message.type === "addComment" ||
         message.type === "updateComment"
       ) {
-        await this.panel?.webview.postMessage({
-          type: "commentResult",
-          generation: this.state.generation,
-          requestId: message.requestId,
-          applied: false,
-          message:
-            "The preview changed while this comment action was open. Try again from the latest preview.",
-        });
+        await this.postCommentResult(
+          message.requestId,
+          false,
+          "The preview changed while this comment action was open. Try again from the latest preview.",
+        );
       }
       return;
     }
@@ -778,7 +959,7 @@ export class PreviewManager implements vscode.Disposable {
         (candidate) => candidate.id === message.editId,
       );
       const result = block
-        ? await this.edits.replaceBlock({
+        ? await this.services.edits.replaceBlock({
             uri: this.state.document.uri,
             expectedDocumentVersion:
               this.state.renderDocumentVersion ?? this.state.document.version,
@@ -794,7 +975,7 @@ export class PreviewManager implements vscode.Disposable {
         (candidate) => candidate.id === message.taskId,
       );
       const result = task
-        ? await this.edits.toggleTask({
+        ? await this.services.edits.toggleTask({
             uri: this.state.document.uri,
             expectedDocumentVersion:
               this.state.renderDocumentVersion ?? this.state.document.version,
@@ -806,14 +987,7 @@ export class PreviewManager implements vscode.Disposable {
       return;
     }
     if (message.type === "addComment") {
-      await this.addComment(
-        message.requestId,
-        message.editId,
-        message.quote,
-        message.quoteOccurrence,
-        message.quoteCount,
-        message.body,
-      );
+      await this.addComment(message);
       return;
     }
     if (message.type === "updateComment") {
@@ -831,52 +1005,76 @@ export class PreviewManager implements vscode.Disposable {
     sidecar: CommentSidecar | undefined,
     rendered: RenderResult,
   ): CommentPayload[] {
+    const source = this.state?.document.getText() ?? "";
+    const blocks = rendered.sourceIndex.editableBlocks;
     return (sidecar?.comments ?? []).map((comment) => {
-      const block =
-        comment.anchor.health === "attached"
-          ? rendered.sourceIndex.editableBlocks.find(
-              (candidate) =>
-                comment.anchor.start >= candidate.startOffset &&
-                comment.anchor.end <= candidate.endOffset,
-            )
-          : undefined;
+      const attached = comment.anchor.health === "attached";
+      const { start, end } = comment.anchor;
+      const block = attached
+        ? blocks.find(
+            (candidate) =>
+              start >= candidate.startOffset && end <= candidate.endOffset,
+          )
+        : undefined;
       const displayQuote = comment.displayQuote ?? comment.anchor.quote.exact;
+      let segments: CommentSegmentPayload[] | undefined;
+      if (attached && !block) {
+        segments = blocks
+          .filter(
+            (candidate) =>
+              candidate.startOffset < end && candidate.endOffset > start,
+          )
+          .flatMap((candidate) => {
+            const segment = renderedSegmentForSource(
+              source.slice(candidate.startOffset, candidate.endOffset),
+              Math.max(start, candidate.startOffset) - candidate.startOffset,
+              Math.min(end, candidate.endOffset) - candidate.startOffset,
+            );
+            return segment
+              ? [
+                  {
+                    editId: candidate.id,
+                    quote: segment.quote,
+                    quoteOccurrence: segment.occurrence,
+                  },
+                ]
+              : [];
+          });
+      }
       const blockSource = block
-        ? this.state?.document
-            .getText()
-            .slice(block.startOffset, block.endOffset)
+        ? source.slice(block.startOffset, block.endOffset)
         : undefined;
       const quoteOccurrence =
         block && blockSource
           ? (renderedQuoteOccurrenceForSource(
               blockSource,
               displayQuote,
-              comment.anchor.start - block.startOffset,
-              comment.anchor.end - block.startOffset,
+              start - block.startOffset,
+              end - block.startOffset,
             ) ?? 0)
           : 0;
       return {
         id: comment.id,
-        editId: block?.id,
+        editId: block?.id ?? segments?.[0]?.editId,
         resolution: comment.resolution,
         health: comment.anchor.health,
         quote: displayQuote,
         quoteOccurrence,
+        ...(segments && segments.length > 0 ? { segments } : {}),
         body: comment.body,
         author: comment.author,
       };
     });
   }
 
-  private async addComment(
-    requestId: string,
-    editId: string,
-    quote: string,
-    quoteOccurrence: number,
-    quoteCount: number,
-    body: string,
-  ): Promise<void> {
+  private async addComment(message: AddCommentMessage): Promise<void> {
+    const { requestId } = message;
     if (!this.panel || !this.state || !this.state.render) {
+      await this.postCommentResult(
+        requestId,
+        false,
+        "The preview is still loading. Try again in a moment.",
+      );
       return;
     }
     const document = this.state.document;
@@ -888,10 +1086,18 @@ export class PreviewManager implements vscode.Disposable {
       );
       return;
     }
-    const block = this.state.render.sourceIndex.editableBlocks.find(
-      (candidate) => candidate.id === editId,
+    const blocks = this.state.render.sourceIndex.editableBlocks;
+    const startBlock = blocks.find(
+      (candidate) => candidate.id === message.editId,
     );
-    if (!block) {
+    const endBlock = message.end
+      ? blocks.find((candidate) => candidate.id === message.end?.editId)
+      : startBlock;
+    if (
+      !startBlock ||
+      !endBlock ||
+      endBlock.startOffset < startBlock.startOffset
+    ) {
       await this.postCommentResult(
         requestId,
         false,
@@ -900,14 +1106,21 @@ export class PreviewManager implements vscode.Disposable {
       return;
     }
     const source = document.getText();
-    const blockSource = source.slice(block.startOffset, block.endOffset);
-    const mapping = mapRenderedQuoteToSource(
-      blockSource,
-      quote,
-      quoteOccurrence,
-      quoteCount,
+    const startMapping = mapRenderedQuoteToSource(
+      source.slice(startBlock.startOffset, startBlock.endOffset),
+      message.quote,
+      message.quoteOccurrence,
+      message.quoteCount,
     );
-    if (!mapping) {
+    const endMapping = message.end
+      ? mapRenderedQuoteToSource(
+          source.slice(endBlock.startOffset, endBlock.endOffset),
+          message.end.quote,
+          message.end.quoteOccurrence,
+          message.end.quoteCount,
+        )
+      : startMapping;
+    if (!startMapping || !endMapping) {
       await this.postCommentResult(
         requestId,
         false,
@@ -915,21 +1128,29 @@ export class PreviewManager implements vscode.Disposable {
       );
       return;
     }
-    const start = block.startOffset + mapping.start;
-    const end = block.startOffset + mapping.end;
+    const start = startBlock.startOffset + startMapping.start;
+    const end = endBlock.startOffset + endMapping.end;
+    if (end <= start) {
+      await this.postCommentResult(
+        requestId,
+        false,
+        "The selected text cannot be mapped safely through this block's Markdown formatting.",
+      );
+      return;
+    }
     const comment = createComment({
       source,
       sourceFile: document.uri.path.split("/").pop() ?? "document.md",
       start,
       end,
       lineHint: document.positionAt(start).line,
-      blockStart: block.startOffset,
-      blockEnd: block.endOffset,
-      body: body.trim(),
+      blockStart: startBlock.startOffset,
+      blockEnd: endBlock.endOffset,
+      body: message.body.trim(),
       author: vscode.workspace
         .getConfiguration("supermarkdown")
         .get<string>("commentAuthor", "Tristan"),
-      displayQuote: quote,
+      displayQuote: message.displayQuote ?? message.quote,
     });
     const result = await this.comments.mutate(document, (sidecar) => ({
       ...sidecar,
@@ -938,7 +1159,7 @@ export class PreviewManager implements vscode.Disposable {
     await this.postCommentResult(
       requestId,
       result.ok,
-      result.ok ? undefined : this.commentStoreMessage(result.error),
+      result.ok ? undefined : commentStoreMessage(result.error),
     );
     if (result.ok) {
       await this.render();
@@ -985,7 +1206,7 @@ export class PreviewManager implements vscode.Disposable {
     await this.postCommentResult(
       requestId,
       result.ok,
-      result.ok ? undefined : this.commentStoreMessage(result.error),
+      result.ok ? undefined : commentStoreMessage(result.error),
     );
     if (result.ok) {
       await this.render();
@@ -1006,66 +1227,6 @@ export class PreviewManager implements vscode.Disposable {
     });
     if (!applied && message) {
       void vscode.window.showWarningMessage(message);
-    }
-  }
-
-  private commentStoreMessage(error: CommentStoreError): string {
-    if (error === "dirty-sidecar") {
-      return "Save the open comments sidecar before changing comments in the preview.";
-    }
-    if (error === "malformed-sidecar") {
-      return "The comments sidecar is invalid or uses a newer schema. It was not overwritten.";
-    }
-    if (error === "sidecar-conflict") {
-      return "The comments sidecar changed externally. Review those changes and try again.";
-    }
-    return "SuperMarkdown could not read or write the comments sidecar.";
-  }
-
-  private async reanchorSavedComments(
-    document: vscode.TextDocument,
-  ): Promise<void> {
-    const result = await this.comments.reanchorExisting(document);
-    if (result && !result.ok) {
-      void vscode.window.showWarningMessage(
-        this.commentStoreMessage(result.error),
-      );
-    }
-  }
-
-  private async handleSourceRenames(
-    files: readonly { oldUri: vscode.Uri; newUri: vscode.Uri }[],
-  ): Promise<void> {
-    for (const file of files) {
-      if (!/\.(?:md|mdown|markdown)$/iu.test(file.oldUri.path)) {
-        continue;
-      }
-      const oldSidecar = this.comments.sidecarUri(file.oldUri);
-      const newSidecar = this.comments.sidecarUri(file.newUri);
-      try {
-        await vscode.workspace.fs.stat(oldSidecar);
-      } catch {
-        continue;
-      }
-      try {
-        await vscode.workspace.fs.rename(oldSidecar, newSidecar, {
-          overwrite: false,
-        });
-      } catch {
-        void vscode.window.showWarningMessage(
-          "SuperMarkdown could not move the comments sidecar with the renamed Markdown file.",
-        );
-      }
-    }
-  }
-
-  private sidecarChanged(uri: vscode.Uri): void {
-    if (
-      this.state &&
-      uri.toString() ===
-        this.comments.sidecarUri(this.state.document.uri).toString()
-    ) {
-      this.scheduleRender(50);
     }
   }
 
@@ -1138,18 +1299,17 @@ export class PreviewManager implements vscode.Disposable {
       return;
     }
 
-    if (action.markdown && this.settings().openMarkdownLinks === "preview") {
-      this.state.document = document;
-      this.state.locked = true;
-      this.updateLocalResourceRoots(document);
-      await this.render();
-      if (action.fragment) {
-        await this.panel.webview.postMessage({
-          type: "navigateAnchor",
-          generation: this.state.generation,
-          fragment: action.fragment,
-        });
-      }
+    if (
+      action.markdown &&
+      isMarkdown(document) &&
+      this.settings().openMarkdownLinks === "preview"
+    ) {
+      // Each Markdown file gets its own preview panel, opened alongside this one.
+      await this.services.openPreview(
+        document,
+        this.panel.viewColumn ?? vscode.ViewColumn.Active,
+        action.fragment,
+      );
       return;
     }
 
@@ -1236,13 +1396,7 @@ export class PreviewManager implements vscode.Disposable {
 
   private updatePanelTitle(): void {
     if (this.panel && this.state) {
-      this.panel.title = `Preview ${this.titleFor(this.state.document)}${
-        this.state.locked ? " (Locked)" : ""
-      }`;
+      this.panel.title = previewTitle(this.state.document);
     }
-  }
-
-  private titleFor(document: vscode.TextDocument): string {
-    return document.uri.path.split("/").pop() ?? "Markdown";
   }
 }

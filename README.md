@@ -5,7 +5,7 @@ A personal VS Code Markdown preview with a local GitHub-compatible renderer, rel
 ## Features
 
 - Local GFM-style rendering with tables, task lists, alerts, footnotes, emoji, KaTeX math, VS Code-style Highlight.js code highlighting, and bundled Mermaid
-- Live keyed refresh, two-way scroll sync, preview locking, and panel restoration
+- One preview panel per Markdown file, live keyed refresh, two-way scroll sync, and panel restoration
 - Safe relative links, heading anchors, watched local images, and blocked remote images by default
 - Raw-Markdown editing for safely mapped headings, paragraphs, fenced code, math, tables, lists, and blockquotes/alerts
 - Direct table-cell editing in the preview, with guarded updates to the underlying Markdown
@@ -18,7 +18,9 @@ A personal VS Code Markdown preview with a local GitHub-compatible renderer, rel
 - `Cmd+K V` / `Ctrl+K V`: open preview to the side
 - Hover a supported rendered block and choose **Edit**, or double-click it
 - Click a plain table cell, or focus it and press `Enter`, to edit its value directly
-- Select text inside one editable block and choose **Comment**
+- Select text (within one block or across several) and choose **Comment**
+
+Each preview panel stays bound to the file it was opened for. Opening a preview for another file, or following a Markdown link in the preview, opens a separate panel for that file.
 - Run **SuperMarkdown: Open Comments Sidecar** to inspect or provide comments to an agent
 
 Markdown-block edits apply with `Cmd/Ctrl+Enter`. Table-cell edits apply with `Enter` or when focus leaves the cell. Both cancel with `Esc`. Successful preview edits and task toggles automatically save the Markdown file to disk. Comments can be resolved, reopened, or deleted from the preview.
@@ -81,8 +83,10 @@ This bumps the patch version by default. Use `--minor` or `--major` when needed.
 - [ ] Edit table header/body cells directly; confirm `Enter`, blur, `Esc`, pipes, missing cells, conflict handling, and undo
 - [ ] Toggle nested and numbered task checkboxes; confirm source updates and undo
 - [ ] Select text, add a comment, resolve/reopen/delete it, and open the JSON sidecar
+- [ ] Add several comments in a row, including multi-line and multi-block selections
+- [ ] Open previews for two Markdown files and confirm each keeps rendering its own file when switching editors
 - [ ] Modify the sidecar externally and confirm the preview refreshes without overwriting conflicts
-- [ ] Reload VS Code and confirm the preview, lock state, and scroll position restore
+- [ ] Reload VS Code and confirm each preview and its scroll position restore
 - [ ] Check keyboard-only focus, `Esc`, `Cmd/Ctrl+Enter`, light/dark/high-contrast themes, and reduced motion
 
 Development is tracked locally in `plans/supermarkdown-extension-plan.md`.

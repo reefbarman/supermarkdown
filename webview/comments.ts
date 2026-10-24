@@ -1,5 +1,11 @@
 import { activateModal, type ModalHandle } from "./accessibility";
 
+export interface CommentSegmentPayload {
+  editId: string;
+  quote: string;
+  quoteOccurrence: number;
+}
+
 export interface CommentPayload {
   id: string;
   editId?: string;
@@ -7,18 +13,26 @@ export interface CommentPayload {
   health: "attached" | "ambiguous" | "orphaned";
   quote: string;
   quoteOccurrence: number;
+  segments?: CommentSegmentPayload[];
   body: string;
   author: string;
 }
 
-export interface AddCommentRequest {
-  requestId: string;
+interface SelectionAnchor {
   editId: string;
   quote: string;
   quoteOccurrence: number;
   quoteCount: number;
-  body: string;
 }
+
+export interface AddCommentRequest extends SelectionAnchor {
+  requestId: string;
+  body: string;
+  end?: SelectionAnchor;
+  displayQuote?: string;
+}
+
+const BLOCK_SELECTOR = "[data-edit-id]:not(.markdown-comment-marker)";
 
 export interface UpdateCommentRequest {
   requestId: string;
@@ -110,23 +124,25 @@ interface HighlightGroup {
   start: number;
 }
 
+interface HighlightEntry {
+  comment: CommentPayload;
+  quote: string;
+  quoteOccurrence: number;
+}
+
 function highlightQuotes(
   block: HTMLElement,
-  comments: CommentPayload[],
+  entries: HighlightEntry[],
 ): HighlightGroup[] {
   const { nodes, text } = textSnapshot(block);
-  const ranges = comments
-    .filter((comment) => comment.health === "attached" && comment.quote)
-    .map((comment) => {
-      const start = occurrenceOffset(
-        text,
-        comment.quote,
-        comment.quoteOccurrence,
-      );
+  const ranges = entries
+    .filter((entry) => entry.comment.health === "attached" && entry.quote)
+    .map((entry) => {
+      const start = occurrenceOffset(text, entry.quote, entry.quoteOccurrence);
       return {
         start,
-        end: start + comment.quote.length,
-        comments: [comment],
+        end: start + entry.quote.length,
+        comments: [entry.comment],
         marks: [] as HTMLElement[],
       };
     })
@@ -251,17 +267,33 @@ export function decorateComments(
   removeExisting(root);
   const focusEditId = pendingFocusEditId;
   pendingFocusEditId = undefined;
-  const grouped = new Map<string, CommentPayload[]>();
+  const grouped = new Map<string, HighlightEntry[]>();
+  const addEntry = (editId: string, entry: HighlightEntry) => {
+    const group = grouped.get(editId) ?? [];
+    group.push(entry);
+    grouped.set(editId, group);
+  };
   for (const comment of comments) {
-    if (!comment.editId) {
-      continue;
+    if (comment.segments && comment.segments.length > 0) {
+      for (const segment of comment.segments) {
+        addEntry(segment.editId, {
+          comment,
+          quote: segment.quote,
+          quoteOccurrence: segment.quoteOccurrence,
+        });
+      }
+    } else if (comment.editId) {
+      addEntry(comment.editId, {
+        comment,
+        quote: comment.quote,
+        quoteOccurrence: comment.quoteOccurrence,
+      });
     }
-    const group = grouped.get(comment.editId) ?? [];
-    group.push(comment);
-    grouped.set(comment.editId, group);
   }
 
-  const unanchored = comments.filter((comment) => !comment.editId);
+  const unanchored = comments.filter(
+    (comment) => !comment.editId && !comment.segments?.length,
+  );
   if (unanchored.length > 0) {
     const tray = document.createElement("aside");
     tray.className = "markdown-comment-tray";
@@ -282,9 +314,11 @@ export function decorateComments(
     if (!block) {
       continue;
     }
-    const openCount = group.filter(
-      (comment) => comment.resolution === "open",
-    ).length;
+    const openCount = new Set(
+      group
+        .filter((entry) => entry.comment.resolution === "open")
+        .map((entry) => entry.comment.id),
+    ).size;
     block.classList.add("has-markdown-comments");
     block.dataset.openCommentCount = String(openCount);
     const highlights = highlightQuotes(block, group);
@@ -366,17 +400,7 @@ export function showSelectionCommentButton(
     return;
   }
   const range = selection.getRangeAt(0);
-  const startElement =
-    range.startContainer instanceof Element
-      ? range.startContainer
-      : range.startContainer.parentElement;
-  const endElement =
-    range.endContainer instanceof Element
-      ? range.endContainer
-      : range.endContainer.parentElement;
-  const startBlock = startElement?.closest<HTMLElement>("[data-edit-id]");
-  const endBlock = endElement?.closest<HTMLElement>("[data-edit-id]");
-  if (!startBlock || startBlock !== endBlock || !root.contains(startBlock)) {
+  if (!commentSelection(root, range)) {
     return;
   }
   const rect = range.getBoundingClientRect();
@@ -407,31 +431,115 @@ export function showSelectionCommentButton(
   );
 }
 
-function quoteOccurrenceBeforeRange(
-  block: HTMLElement,
-  range: Range,
-  quote: string,
+/**
+ * Converts a DOM boundary point into an offset within the block's comment text
+ * (the same text the highlighter searches), ignoring popover and button text.
+ */
+function snapshotOffset(
+  nodes: Text[],
+  container: Node,
+  offset: number,
 ): number {
-  const before = document.createRange();
-  before.selectNodeContents(block);
-  try {
-    before.setEnd(range.startContainer, range.startOffset);
-  } catch {
-    return 0;
+  const point = document.createRange();
+  point.setStart(container, offset);
+  point.collapse(true);
+  let total = 0;
+  for (const node of nodes) {
+    if (node === container) {
+      return total + Math.min(offset, node.data.length);
+    }
+    if (point.comparePoint(node, 0) >= 0) {
+      break;
+    }
+    total += node.data.length;
   }
+  return total;
+}
 
-  const text = before.toString();
-  let occurrence = 0;
+function anchorFor(
+  editId: string,
+  text: string,
+  start: number,
+  end: number,
+): SelectionAnchor {
+  const quote = text.slice(start, end);
+  let quoteOccurrence = 0;
+  let quoteCount = 0;
   let offset = 0;
   while (offset <= text.length - quote.length) {
     const found = text.indexOf(quote, offset);
     if (found < 0) {
       break;
     }
-    occurrence += 1;
+    if (found < start) {
+      quoteOccurrence += 1;
+    }
+    quoteCount += 1;
     offset = found + quote.length;
   }
-  return occurrence;
+  return {
+    editId,
+    quote,
+    quoteOccurrence,
+    quoteCount: Math.max(1, quoteCount),
+  };
+}
+
+interface CommentSelection {
+  start: SelectionAnchor;
+  end?: SelectionAnchor;
+  displayQuote: string;
+}
+
+function commentSelection(
+  root: HTMLElement,
+  range: Range,
+): CommentSelection | undefined {
+  const parts: { editId: string; text: string; start: number; end: number }[] =
+    [];
+  for (const block of Array.from(
+    root.querySelectorAll<HTMLElement>(BLOCK_SELECTOR),
+  )) {
+    const editId = block.dataset.editId;
+    if (!editId || !range.intersectsNode(block)) {
+      continue;
+    }
+    const { nodes, text } = textSnapshot(block);
+    let start = block.contains(range.startContainer)
+      ? snapshotOffset(nodes, range.startContainer, range.startOffset)
+      : 0;
+    let end = block.contains(range.endContainer)
+      ? snapshotOffset(nodes, range.endContainer, range.endOffset)
+      : text.length;
+    while (start < end && /\s/u.test(text[start])) {
+      start += 1;
+    }
+    while (end > start && /\s/u.test(text[end - 1])) {
+      end -= 1;
+    }
+    if (end > start) {
+      parts.push({ editId, text, start, end });
+    }
+  }
+  const first = parts[0];
+  const last = parts.at(-1);
+  if (!first || !last) {
+    return undefined;
+  }
+  const displayQuote = parts
+    .map((part) => part.text.slice(part.start, part.end))
+    .join("\n\n");
+  if (first === last) {
+    return {
+      start: anchorFor(first.editId, first.text, first.start, first.end),
+      displayQuote,
+    };
+  }
+  return {
+    start: anchorFor(first.editId, first.text, first.start, first.end),
+    end: anchorFor(last.editId, last.text, last.start, last.end),
+    displayQuote,
+  };
 }
 
 export function beginCommentFromSelection(
@@ -442,42 +550,11 @@ export function beginCommentFromSelection(
   if (!selection || selection.isCollapsed || selection.rangeCount !== 1) {
     return false;
   }
-  const range = selection.getRangeAt(0);
-  const startElement =
-    range.startContainer instanceof Element
-      ? range.startContainer
-      : range.startContainer.parentElement;
-  const endElement =
-    range.endContainer instanceof Element
-      ? range.endContainer
-      : range.endContainer.parentElement;
-  const startBlock = startElement?.closest<HTMLElement>("[data-edit-id]");
-  const endBlock = endElement?.closest<HTMLElement>("[data-edit-id]");
-  const quote = selection.toString().trim();
-  if (
-    !startBlock ||
-    startBlock !== endBlock ||
-    !quote ||
-    !root.contains(startBlock)
-  ) {
+  const selected = commentSelection(root, selection.getRangeAt(0));
+  if (!selected) {
     return false;
   }
-  const editId = startBlock.dataset.editId;
-  if (!editId) {
-    return false;
-  }
-  const quoteOccurrence = quoteOccurrenceBeforeRange(startBlock, range, quote);
-  const renderedText = textSnapshot(startBlock).text;
-  let quoteCount = 0;
-  let quoteOffset = 0;
-  while (quoteOffset <= renderedText.length - quote.length) {
-    const found = renderedText.indexOf(quote, quoteOffset);
-    if (found < 0) {
-      break;
-    }
-    quoteCount += 1;
-    quoteOffset = found + quote.length;
-  }
+  const quote = selected.displayQuote;
 
   closeComposer();
   const backdrop = document.createElement("div");
@@ -489,8 +566,8 @@ export function beginCommentFromSelection(
   dialog.setAttribute("aria-label", "Add comment to selected Markdown text");
   const title = document.createElement("strong");
   title.textContent = "Add comment";
-  const selected = document.createElement("blockquote");
-  selected.textContent = quote;
+  const quoteElement = document.createElement("blockquote");
+  quoteElement.textContent = quote;
   const body = document.createElement("textarea");
   body.setAttribute("aria-label", "Comment text");
   const status = document.createElement("span");
@@ -521,11 +598,11 @@ export function beginCommentFromSelection(
     });
     send({
       requestId,
-      editId,
-      quote,
-      quoteOccurrence,
-      quoteCount,
+      ...selected.start,
       body: body.value.trim(),
+      ...(selected.end
+        ? { end: selected.end, displayQuote: selected.displayQuote }
+        : {}),
     });
   });
   cancel.addEventListener("click", closeComposer);
@@ -536,7 +613,7 @@ export function beginCommentFromSelection(
     }
   });
   controls.append(add, cancel, status);
-  dialog.append(title, selected, body, controls);
+  dialog.append(title, quoteElement, body, controls);
   backdrop.append(dialog);
   document.body.append(backdrop);
   activeComposer = backdrop;

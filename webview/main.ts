@@ -422,6 +422,21 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     announce(message.message);
     return;
   }
+  if (
+    message.type === "commentResult" &&
+    typeof message.requestId === "string" &&
+    typeof message.applied === "boolean"
+  ) {
+    // Request IDs are unique, so a reply is always safe to apply even if a
+    // newer render arrived while the request was in flight.
+    handleCommentResult(message.requestId, message.applied, message.message);
+    announce(
+      message.applied
+        ? "Comment updated."
+        : (message.message ?? "Could not update comment."),
+    );
+    return;
+  }
   if (message.generation !== generation) {
     return;
   }
@@ -530,17 +545,6 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
         }
       }, 1500);
     }
-  } else if (
-    message.type === "commentResult" &&
-    typeof message.requestId === "string" &&
-    typeof message.applied === "boolean"
-  ) {
-    handleCommentResult(message.requestId, message.applied, message.message);
-    announce(
-      message.applied
-        ? "Comment updated."
-        : (message.message ?? "Could not update comment."),
-    );
   } else if (
     message.type === "navigateAnchor" &&
     typeof message.fragment === "string"

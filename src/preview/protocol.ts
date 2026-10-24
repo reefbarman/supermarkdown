@@ -32,6 +32,12 @@ export interface PreviewNotice {
   message: string;
 }
 
+export interface CommentSegmentPayload {
+  editId: string;
+  quote: string;
+  quoteOccurrence: number;
+}
+
 export interface CommentPayload {
   id: string;
   editId?: string;
@@ -39,6 +45,8 @@ export interface CommentPayload {
   health: "attached" | "ambiguous" | "orphaned";
   quote: string;
   quoteOccurrence: number;
+  /** Present when a comment spans several blocks: one highlight per block. */
+  segments?: CommentSegmentPayload[];
   body: string;
   author: string;
 }
@@ -150,6 +158,14 @@ export interface AddCommentMessage {
   quoteOccurrence: number;
   quoteCount: number;
   body: string;
+  /** Multi-block selections: where the selection ends, in a later block. */
+  end?: {
+    editId: string;
+    quote: string;
+    quoteOccurrence: number;
+    quoteCount: number;
+  };
+  displayQuote?: string;
 }
 
 export interface UpdateCommentMessage {
@@ -221,6 +237,49 @@ function boundedNumber(
     value >= minimum &&
     value <= maximum
   );
+}
+
+function validCommentEnd(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const end = value as Record<string, unknown>;
+  return (
+    typeof end.editId === "string" &&
+    end.editId.length > 0 &&
+    end.editId.length <= 128 &&
+    typeof end.quote === "string" &&
+    end.quote.length > 0 &&
+    end.quote.length <= 100_000 &&
+    Number.isSafeInteger(end.quoteOccurrence) &&
+    (end.quoteOccurrence as number) >= 0 &&
+    (end.quoteOccurrence as number) <= 100_000 &&
+    Number.isSafeInteger(end.quoteCount) &&
+    (end.quoteCount as number) > 0 &&
+    (end.quoteCount as number) <= 100_000
+  );
+}
+
+/**
+ * Identifies a request that failed validation but still carries a usable
+ * requestId, so the host can reply instead of leaving the webview waiting.
+ */
+export function rejectedRequest(
+  value: unknown,
+): { type: "addComment" | "updateComment"; requestId: string } | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const message = value as Record<string, unknown>;
+  if (
+    (message.type === "addComment" || message.type === "updateComment") &&
+    typeof message.requestId === "string" &&
+    message.requestId.length > 0 &&
+    message.requestId.length <= 128
+  ) {
+    return { type: message.type, requestId: message.requestId };
+  }
+  return undefined;
 }
 
 export function parseWebviewMessage(
@@ -348,8 +407,13 @@ export function parseWebviewMessage(
     (message.quoteCount as number) <= 100_000 &&
     typeof message.body === "string" &&
     message.body.trim().length > 0 &&
-    message.body.length <= 100_000
+    message.body.length <= 100_000 &&
+    (message.end === undefined || validCommentEnd(message.end)) &&
+    (message.displayQuote === undefined ||
+      (typeof message.displayQuote === "string" &&
+        message.displayQuote.length <= 1_000_000))
   ) {
+    const end = message.end as AddCommentMessage["end"];
     return {
       type: "addComment",
       generation: message.generation,
@@ -359,6 +423,19 @@ export function parseWebviewMessage(
       quoteOccurrence: message.quoteOccurrence as number,
       quoteCount: message.quoteCount as number,
       body: message.body,
+      ...(end
+        ? {
+            end: {
+              editId: end.editId,
+              quote: end.quote,
+              quoteOccurrence: end.quoteOccurrence,
+              quoteCount: end.quoteCount,
+            },
+          }
+        : {}),
+      ...(typeof message.displayQuote === "string"
+        ? { displayQuote: message.displayQuote }
+        : {}),
     };
   }
   if (

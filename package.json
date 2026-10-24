@@ -46,10 +46,6 @@
         "title": "SuperMarkdown: Refresh Preview"
       },
       {
-        "command": "supermarkdown.togglePreviewLock",
-        "title": "SuperMarkdown: Toggle Preview Lock"
-      },
-      {
         "command": "supermarkdown.openCommentsSidecar",
         "title": "SuperMarkdown: Open Comments Sidecar"
       }

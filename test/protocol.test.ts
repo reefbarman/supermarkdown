@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-
-import { parseWebviewMessage } from "../src/preview/protocol";
+import { parseWebviewMessage, rejectedRequest } from "../src/preview/protocol";
 
 describe("parseWebviewMessage", () => {
   it("accepts known messages with valid fields", () => {
@@ -115,6 +114,39 @@ describe("parseWebviewMessage", () => {
       commentId: "c-1",
       action: "resolve",
     });
+  });
+
+  it("accepts multi-block comment selections and flags rejected requests", () => {
+    const message = {
+      type: "addComment",
+      generation: 4,
+      requestId: "comment-3",
+      editId: "edit-1",
+      quote: "first part",
+      quoteOccurrence: 0,
+      quoteCount: 1,
+      body: "Spans blocks.",
+      end: {
+        editId: "edit-3",
+        quote: "last part",
+        quoteOccurrence: 0,
+        quoteCount: 1,
+      },
+      displayQuote: "first part\n\nlast part",
+    };
+    expect(parseWebviewMessage(message)).toEqual(message);
+    expect(
+      parseWebviewMessage({
+        ...message,
+        end: { ...message.end, quoteCount: 0 },
+      }),
+    ).toBeUndefined();
+    expect(
+      rejectedRequest({ ...message, end: { ...message.end, quoteCount: 0 } }),
+    ).toEqual({ type: "addComment", requestId: "comment-3" });
+    expect(
+      rejectedRequest({ type: "openLink", requestId: "x" }),
+    ).toBeUndefined();
   });
 
   it("rejects malformed or unknown messages", () => {

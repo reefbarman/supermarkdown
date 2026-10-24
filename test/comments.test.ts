@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   mapRenderedQuoteToSource,
   renderedQuoteOccurrenceForSource,
+  renderedSegmentForSource,
 } from "../src/comments/sourceMapping";
 
 import { parseSidecar } from "../src/comments/validation";
@@ -62,6 +63,33 @@ describe("comment anchors", () => {
         punctuation!.end,
       ),
     ).toBe(0);
+  });
+
+  it("maps selections across soft line breaks", () => {
+    const source = "Frankie the frill-neck\nwas shy as can be.\n";
+    const mapping = mapRenderedQuoteToSource(
+      source,
+      "frill-neck\nwas shy",
+      0,
+      1,
+    );
+
+    expect(source.slice(mapping!.start, mapping!.end)).toBe(
+      "frill-neck\nwas shy",
+    );
+  });
+
+  it("projects a source range in a block to its rendered segment", () => {
+    const source = "*Right*\n";
+    expect(renderedSegmentForSource(source, 0, source.length)).toEqual({
+      quote: "Right",
+      occurrence: 0,
+    });
+    const repeated = "ran and ran\n";
+    expect(
+      renderedSegmentForSource(repeated, repeated.lastIndexOf("ran"), 11),
+    ).toEqual({ quote: "ran", occurrence: 1 });
+    expect(renderedSegmentForSource("text\n", 4, 5)).toBeUndefined();
   });
 
   it("does not confuse star list markers with emphasis delimiters", () => {

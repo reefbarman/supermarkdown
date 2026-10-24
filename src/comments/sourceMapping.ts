@@ -189,6 +189,52 @@ export function mapRenderedQuoteToSource(
   return mappings[occurrence];
 }
 
+export interface RenderedSegment {
+  quote: string;
+  occurrence: number;
+}
+
+/**
+ * Projects a source range inside a block to the rendered text a reader sees,
+ * returning that text and which non-overlapping occurrence of it the range is.
+ */
+export function renderedSegmentForSource(
+  blockSource: string,
+  start: number,
+  end: number,
+): RenderedSegment | undefined {
+  const projection = projectSource(blockSource);
+  let first = projection.starts.findIndex((index) => index >= start);
+  if (first < 0) {
+    return undefined;
+  }
+  let last = first;
+  while (last < projection.starts.length && projection.starts[last] < end) {
+    last += 1;
+  }
+  while (first < last && /\s/u.test(projection.text[first])) {
+    first += 1;
+  }
+  while (last > first && /\s/u.test(projection.text[last - 1])) {
+    last -= 1;
+  }
+  if (last <= first) {
+    return undefined;
+  }
+  const quote = projection.text.slice(first, last);
+  let occurrence = 0;
+  let offset = 0;
+  while (offset <= first) {
+    const found = projection.text.indexOf(quote, offset);
+    if (found < 0 || found >= first) {
+      break;
+    }
+    occurrence += 1;
+    offset = found + quote.length;
+  }
+  return { quote, occurrence };
+}
+
 export function renderedQuoteOccurrenceForSource(
   blockSource: string,
   quote: string,
