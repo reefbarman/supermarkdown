@@ -368,6 +368,23 @@ export function createCompatibilityRenderer(
   taskLists(markdown);
   math(markdown, fragments);
 
+  // Match GitHub's table output without allowing raw HTML styles through the sanitizer.
+  markdown.core.ruler.push("table_alignment", ({ tokens }) => {
+    for (const token of tokens) {
+      if (token.type !== "th_open" && token.type !== "td_open") {
+        continue;
+      }
+      const style = token.attrs?.find((attribute) => attribute[0] === "style");
+      const alignment = style?.[1].match(
+        /^text-align:(left|center|right)$/u,
+      )?.[1];
+      if (style && alignment) {
+        style[0] = "align";
+        style[1] = alignment;
+      }
+    }
+  });
+
   const defaultFence = markdown.renderer.rules.fence?.bind(
     markdown.renderer.rules,
   );

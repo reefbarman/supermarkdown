@@ -25,6 +25,35 @@ describe("renderMarkdown", () => {
     expect(result.html).not.toContain("action=");
   });
 
+  it("preserves HTML alignment without allowing inline styles", async () => {
+    const result = await renderMarkdown(
+      '<p align="center" style="color:red"><img src="App/Assets.xcassets/AppIcon.appiconset/AppIcon.png" width="128" alt="iPlay5 icon"></p>\n\n<div align="right">Right</div>\n',
+    );
+
+    expect(result.html).toContain(
+      '<p align="center"><img src="App/Assets.xcassets/AppIcon.appiconset/AppIcon.png" width="128" alt="iPlay5 icon" /></p>',
+    );
+    expect(result.html).toContain('<div align="right">Right</div>');
+    expect(result.html).not.toContain("style=");
+  });
+
+  it("renders Markdown table column alignment the same way as GitHub", async () => {
+    const result = await renderMarkdown(`
+| Left | Center | Right | Default |
+| :--- | :----: | ----: | ------- |
+| A    | B      | C     | D       |
+`);
+
+    expect(result.html).toContain('<th align="left">Left</th>');
+    expect(result.html).toContain('<th align="center">Center</th>');
+    expect(result.html).toContain('<th align="right">Right</th>');
+    expect(result.html).toContain("<th>Default</th>");
+    expect(result.html).toContain('<td align="left">A</td>');
+    expect(result.html).toContain('<td align="center">B</td>');
+    expect(result.html).toContain('<td align="right">C</td>');
+    expect(result.html).toContain("<td>D</td>");
+  });
+
   it("does not turn unsafe URL schemes into links", async () => {
     const result = await renderMarkdown("[click](javascript:alert(1))\n");
 

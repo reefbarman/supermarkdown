@@ -139,6 +139,7 @@ function sanitizeRenderedHtml(html: string): string {
     ]),
     allowedAttributes: {
       "*": [
+        "align",
         "class",
         "id",
         "data-id",
